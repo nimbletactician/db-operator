@@ -1,69 +1,148 @@
-Controller Initialization
+# DatabaseBackup Controller
 
-  The initialization starts in main.go with these key steps:
+A Kubernetes operator for managing scheduled database backups.
 
-  1. Scheme Registration: The application registers both standard Kubernetes types and your custom DatabaseBackup type to the runtime scheme, enabling serialization/deserialization
-  of these resources.
-  2. Manager Setup: A controller-runtime Manager is created, which:
-    - Sets up caching for watched resources
-    - Provides a client for CRUD operations
-    - Configures metrics, health probes, and leader election
-  3. Controller Registration: The DatabaseBackupReconciler is instantiated and registered with the manager, configured to watch DatabaseBackup resources and the Jobs it creates.
+## Overview
 
-  Reconciliation Loop
+The DatabaseBackup controller automates the process of backing up databases running in Kubernetes. It follows a declarative approach where users create DatabaseBackup custom resources to define their backup requirements, and the controller handles scheduling, execution, and monitoring of backup jobs.
 
-  The core of the controller is the Reconcile method, which:
+## Features
 
-  1. Fetches the CR: Gets the DatabaseBackup resource that triggered reconciliation
-  2. Manages Status: Checks and updates status fields:
-    - Initializes status when first created
-    - Tracks active backup jobs
-    - Updates timestamps for successful backups
-    - Records failure reasons
-  3. Schedule Processing:
-    - Parses the cron schedule
-    - Calculates next run time
-    - Determines if a backup should be triggered now
-  4. Job Management:
-    - Creates Jobs for executing the actual backup
-    - Configures the job with appropriate container image and environment variables
-    - Sets up storage volumes based on configuration (S3, GCS, PVC)
-  5. Requeue Logic:
-    - Schedules the next reconciliation to match the backup schedule
+- Scheduled backups using cron expressions
+- Support for PostgreSQL databases (extensible to other database types)
+- Cloud storage integration (S3)
+- Configurable backup retention periods
+- Database selection via Kubernetes labels
+- Automatic backup status tracking and monitoring
 
-  Complete Flow with Sample CR
+## Custom Resource Definition
 
-  When you deploy the sample PostgreSQL backup CR:
+The `DatabaseBackup` custom resource allows you to define your backup configuration:
 
-  1. CR Creation:
-    - The postgres-daily-backup CR is submitted to the Kubernetes API
-    - The API server validates it against CRD schema
-    - The controller receives a watch event
-  2. First Reconciliation:
-    - Status is initialized to "Pending"
-    - Schedule "0 1 * * *" is parsed
-    - Next scheduled backup time is calculated (1 AM next occurrence)
-    - Controller requeues until scheduled time
-  3. Backup Execution:
-    - When the scheduled time arrives:
-        - Controller creates a backup Job named like postgres-daily-backup-20250327010000
-      - Job uses ghcr.io/example/postgres-backup:latest image
-      - S3 storage configuration is set via environment variables
-      - S3 credentials are mounted from the s3-credentials secret
-      - Controller sets CR status to "Running" with the active job name
-  4. Job Completion:
-    - When job completes:
-        - Controller updates status to "Succeeded" or "Failed"
-      - Updates lastSuccessfulBackup timestamp if successful
-      - Records failureReason if failed
-      - Sets next backup for 1 AM the following day
-  5. Continuous Operation:
-    - Process repeats daily at 1 AM
-    - Backups are stored at s3://my-database-backups/postgres/daily
-    - Retained for 14 days (336 hours)
+```yaml
+apiVersion: db.example.io/v1alpha1
+kind: DatabaseBackup
+metadata:
+  name: postgres-daily-backup
+  namespace: default
+spec:
+  databaseType: postgres
+  schedule: "0 1 * * *"  # Daily at 1 AM
+  backupRetention: 336   # 14 days (in hours)
+  storageDestination:
+    type: s3
+    bucket: my-database-backups
+    path: postgres/daily
+    secretName: s3-credentials
+  databaseSelector:
+    matchLabels:
+      app: postgres
+      role: primary
+```
 
-  The controller demonstrates the Kubernetes operator pattern effectively by:
-  - Converting declarative specs into imperative actions
-  - Continuously reconciling to maintain the desired state
-  - Leveraging Kubernetes Jobs for the actual work
-  - Providing status updates and next steps information
+## Controller Reconciliation Process
+
+The controller follows a carefully designed reconciliation loop to ensure your backups run as scheduled:
+
+1. **Request Processing**: Controller receives reconcile request for a DatabaseBackup CR
+2. **Resource Retrieval**: Fetches the DatabaseBackup resource and its current state
+3. **Status Initialization**: Initializes status fields if first reconciliation
+4. **Active Job Check**: Verifies if a backup job is already running
+5. **Schedule Validation**: Parses and validates the cron expression
+6. **Next Run Calculation**: Determines when the next backup should run
+7. **Backup Decision**: Determines if a backup job needs to be created now
+8. **Job Creation**: Creates a Kubernetes Job to perform the backup when needed
+9. **Status Updates**: Maintains accurate status information throughout the process
+10. **Requeue Timing**: Schedules next controller reconciliation based on backup schedule
+11. **Job Monitoring**: Tracks backup job progress and updates status accordingly
+12. **Failure Handling**: Records and reports any backup failures
+13. **Cycle Completion**: Prepares for next scheduled backup
+
+## Status Fields
+
+The controller maintains several status fields to track backup operations:
+
+- `LastBackupStatus`: Current status of the most recent backup (Pending, Running, Succeeded, Failed)
+- `NextScheduledBackup`: Timestamp of the next scheduled backup
+- `ActiveBackupJob`: Name of the currently running backup job (if any)
+- `LastSuccessfulBackup`: Timestamp of the most recent successful backup
+- `FailureReason`: Details about backup failures (if any)
+
+## Usage Example
+
+1. Create a Secret containing your S3 credentials:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: s3-credentials
+  namespace: default
+type: Opaque
+data:
+  AWS_ACCESS_KEY_ID: <base64-encoded-access-key>
+  AWS_SECRET_ACCESS_KEY: <base64-encoded-secret-key>
+```
+
+2. Deploy your database with appropriate labels:
+
+```yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: default
+spec:
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+        role: primary
+    # ... rest of your database configuration
+```
+
+3. Create your DatabaseBackup resource:
+
+```yaml
+apiVersion: db.example.io/v1alpha1
+kind: DatabaseBackup
+metadata:
+  name: postgres-daily-backup
+  namespace: default
+spec:
+  databaseType: postgres
+  schedule: "0 1 * * *"  # Daily at 1 AM
+  backupRetention: 336   # 14 days (in hours)
+  storageDestination:
+    type: s3
+    bucket: my-database-backups
+    path: postgres/daily
+    secretName: s3-credentials
+  databaseSelector:
+    matchLabels:
+      app: postgres
+      role: primary
+```
+
+4. Monitor backup status:
+
+```bash
+kubectl get databasebackups
+kubectl describe databasebackup postgres-daily-backup
+```
+
+## Troubleshooting
+
+If backups are failing, check:
+
+1. The FailureReason in the DatabaseBackup status
+2. Logs from the backup job itself
+3. Verify S3 credentials and permissions
+4. Ensure the database is accessible using the selector labels
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
